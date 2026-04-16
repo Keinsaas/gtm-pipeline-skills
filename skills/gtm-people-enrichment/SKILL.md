@@ -1,0 +1,369 @@
+---
+name: gtm-pipeline:people-enrichment
+description: Enrich contacts with work email, phone number, and/or LinkedIn URL. Use when you have a contact list that needs enrichment before outreach. Email waterfall (FullEnrich → Pipe0), phone (BetterContact → FullEnrich). Enforces demo mode (email only, no phone). Also triggers on "enrich contacts", "find emails for", "get phone numbers for".
+---
+
+# People Enrichment
+
+Enrich contacts with work email, phone number, and/or LinkedIn URL. Returns an updated CSV.
+
+**Read `~/.claude/skills/gtm-pipeline/_shared/conventions.md` before executing.**
+
+---
+
+## When to Use
+
+- You have a contact list and need emails and/or phone numbers
+- Contacts from people-search need enrichment before outreach
+- A user-provided CSV has names + companies but missing contact info
+
+## Inputs
+
+| Input | Required | Source |
+|-------|----------|--------|
+| Contact CSV | Yes | People Search output or user-provided |
+| LinkedIn profile URLs | Recommended | In CSV or from People Search |
+| Company domains | Recommended | In CSV |
+| Enrichment type | Yes | `email`, `phone`, or `both` |
+
+## Demo Mode
+
+When invoked from the demo flow: **email only, skip all phone providers entirely.**
+
+---
+
+## Provider Selection
+
+### Email
+
+**Ask the user which provider to use. Default recommendation:**
+
+| Priority | Provider | Hit Rate | Cost | Speed | Notes |
+|----------|----------|----------|------|-------|-------|
+| 1st | **FullEnrich v2** | 80% (SA), 83% (DACH) | 0.8 cr/contact | instant | Clear winner |
+| 2nd | **Pipe0 waterfall** | 60% (SA), 83% (DACH) | 1.0–3.5 cr/contact | ~3 min/20 contacts | Solid backup |
+| 3rd | **BetterContact** (email-only) | ~60% test / **14% production SA** | 0.35 cr/contact | 30–90 min | Not recommended — slow, unreliable production |
+
+**Recommended flow:** FullEnrich first → Pipe0 for FE misses → skip BC for email.
+
+### Phone
+
+**Skip entirely in demo mode.**
+
+| Priority | Provider | Hit Rate | Cost | Speed | Notes |
+|----------|----------|----------|------|-------|-------|
+| 1st | **FullEnrich v2** | ~60% DACH | ~0.8 cr/contact | instant | Good DACH coverage. Prefer `most_probable_phone.number` over `phones[0]` (phones[0] can be landline, most_probable is mobile) |
+| 2nd | **Pipe0 phone waterfall** | **~92% DACH (n=74)** · 0% SA | 2–7 cr/contact | ~30s/batch | Response field: `mobile` (not `phone`). Works reliably as FE fallback — on 7 FE contacts missing phones, recovered 5 (71%). Also strong as primary when contacts come from Pipe0 search (68/74 = 92%) |
+| 3rd | **BetterContact** | 13–74% (~22% SA, ~53% DACH) | ~1–2 cr/contact | **5–10+ min** for small batches | Unreliable speed — took 10+ min for 2 contacts in DACH test. Retest before production |
+
+### LinkedIn URL (when missing)
+
+- **Pipe0 `people:profileurl:name@1`** — 0.60 cr/person, needs name + company_name + location_hint
+- **PhantomBuster Profile Scraper** (config key: `PB_AGENT_PROFILE`) — scrape full profile data from existing LinkedIn URL; use `/phantombuster` skill with phantom name "LinkedIn Profile Scraper" and CSV path. See `_shared/phantombuster.md`.
+
+---
+
+## Execution Protocol
+
+### 1. Assess Input Data
+- Check what fields are available (LinkedIn URL, domain, name, company)
+- Determine which enrichment types are needed
+- Estimate credit cost: `n_contacts × max_cost_per_record`
+- Confirm credit balance with user before proceeding
+
+### 2. Test Batch (5–10 contacts)
+- Run chosen provider on 5–10 contacts in production
+- Inspect every result: email validity status, phone format, match accuracy
+- Check hit rate — if below 10%, investigate before proceeding
+
+### 3. Review with User
+- Present test results with hit rate, status breakdown, sample data
+- Confirm provider choice and credit spend for full batch
+- Get approval
+
+### 4. Full Batch
+- Split into chunks of **max 100 contacts** per request (all providers)
+- **Save request/task IDs immediately**
+- Poll with appropriate timeouts:
+  - FE: 15s interval, 600s timeout (usually instant)
+  - Pipe0: 30s interval, 600s timeout (≤100 contacts)
+  - BC phone: 30s interval, 900s timeout
+  - BC email: 60s interval, 3600s timeout
+- Save results incrementally after each batch
+
+### 5. Fallback Pass
+- Identify contacts with missing email/phone after primary provider
+- Run fallback provider on misses only
+- Merge results
+
+### 6. Final Output
+- Merge all provider results into single CSV
+- Add `email_source` and `phone_source` columns for traceability
+- Flag email status (deliverable, catch_all, undeliverable)
+- Write to `csv/output/contacts_enriched.csv`
+
+---
+
+## Provider 1: FullEnrich v2 (Email + Phone)
+
+**Endpoint:** `POST https://app.fullenrich.com/api/v2/contact/enrich/bulk`
+**Auth:** `Authorization: Bearer $FULLENRICH_API_KEY`
+
+### Submit (max 100 contacts/batch)
+```json
+{
+  "name": "My enrichment job",
+  "data": [
+    {
+      "firstname": "Jane",
+      "lastname": "Doe",
+      "domain": "example.com",
+      "linkedin_url": "https://www.linkedin.com/in/janedoe",
+      "enrich_fields": ["contact.emails"],
+      "custom": {"row_id": "0"}
+    }
+  ]
+}
+```
+
+For phone: `"enrich_fields": ["contact.phones"]` or both: `["contact.emails", "contact.phones"]`
+
+### Poll
+```
+GET https://app.fullenrich.com/api/v2/contact/enrich/bulk/{enrichment_id}
+```
+Done when: `response["status"] == "FINISHED"`
+Speed: **usually instant** — often finished before first poll. Use 15s interval, 600s timeout.
+
+### Parse
+```python
+for entry in result.get("data", []):
+    row_id = str(entry.get("custom", {}).get("row_id", ""))
+    ci = entry.get("contact_info", {})
+    # Email
+    best = ci.get("most_probable_work_email", {})
+    email = best.get("email", "") or ""
+    if not email:
+        for e in ci.get("work_emails", []):
+            if e.get("email"):
+                email = e["email"]; break
+    email_status = best.get("status", "")  # DELIVERABLE / HIGH_PROBABILITY / CATCH_ALL
+    # Phone
+    phone_list = ci.get("phones", [])
+    phone = phone_list[0].get("number", "") if phone_list else ""
+```
+
+### Key Notes
+- Base URL is `app.fullenrich.com` (NOT `api.fullenrich.com`)
+- Use v2 (not v1)
+- Max 100 contacts per batch
+- Submit response key is `enrichment_id` (UUID)
+- Email: `contact_info.most_probable_work_email.email`
+- Phone: `contact_info.phones[0].number`
+- If credits run out mid-batch: `status = "CREDITS_INSUFFICIENT"`, partial results returned
+- Email status values: `DELIVERABLE`, `HIGH_PROBABILITY`, `CATCH_ALL`
+
+### Cost
+~0.8 credits/contact
+
+### Docs
+https://docs.fullenrich.com
+
+---
+
+## Provider 2: Pipe0 Email Waterfall
+
+**Pipe ID:** `people:workemail:profileurl:waterfall@1`
+**Auth:** `Authorization: Bearer $PIPE0_API_KEY`
+**Use curl** — Python requests blocked by Cloudflare.
+
+### Submit
+```json
+{
+  "config": {"environment": "production"},
+  "pipes": [{"pipe_id": "people:workemail:profileurl:waterfall@1"}],
+  "input": [
+    {"id": "1", "profile_url": "https://linkedin.com/in/janedoe"}
+  ]
+}
+```
+
+### Key Notes
+- **Submit response key is `id`** (not `task_id`) — use this value for polling: `GET /pipes/check/{id}`
+- `email_validation_status` field is also returned alongside `work_email` in each record
+- **Email quality: ~15–25% of hits may be stale** (old employer email) for EU audiences. Waterfall picks up the most recent known email regardless of current role. Always post-filter: remove personal domains (gmail, yahoo, etc.) and cross-check email domain against current company. In EU SME test: 37/43 raw hits, 30/43 valid after filtering 7 stale/personal.
+
+### Poll
+```
+GET https://api.pipe0.com/v1/pipes/check/{id}
+```
+Done when: `status == "completed"`. Use 30s interval, 600s timeout (~3 min for 43 contacts). Keep batches ≤100 contacts.
+
+### Parse
+```python
+records = result.get("records", {})
+for rid, rec in records.items():
+    fields = rec.get("fields", {})
+    email  = (fields.get("work_email", {}) or {}).get("value", "") or ""
+    status = (fields.get("email_validation_status", {}) or {}).get("value", "") or ""
+    # work_email.value is a plain string, NOT nested
+```
+
+### Post-filtering (Recommended)
+After enrichment, filter out stale/personal emails:
+```python
+PERSONAL_DOMAINS = {'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com'}
+df['email'] = df['email'].apply(
+    lambda e: "" if (e and e.split('@')[-1].lower() in PERSONAL_DOMAINS) else e
+)
+# Also manually flag emails where domain doesn't match current company
+```
+
+### Waterfall Providers & Cost
+| Provider | Cost |
+|----------|------|
+| HunterMail | 1.00 cr |
+| LeadMagic | 2.00 cr |
+| FindyMail | 2.00 cr |
+| Crustdata | 3.50 cr |
+Stops at first hit. Total: 1.00–3.50 cr/contact.
+
+---
+
+## Provider 3: BetterContact (Email or Phone)
+
+**Endpoint:** `POST https://app.bettercontact.rocks/api/v2/async`
+**Auth:** `X-API-KEY: $BETTERCONTACT_API_KEY`
+
+### Submit (max 100 contacts/batch)
+```json
+{
+  "enrich_email_address": false,
+  "enrich_phone_number": true,
+  "data": [
+    {
+      "first_name": "Jane",
+      "last_name": "Doe",
+      "company_domain": "example.com",
+      "linkedin_url": "https://www.linkedin.com/in/janedoe",
+      "custom_fields": {"row_id": "0"}
+    }
+  ]
+}
+```
+
+### Poll
+```
+GET https://app.bettercontact.rocks/api/v2/async/{request_id}
+```
+Done when: `response["status"] == "terminated"` (NOT "completed")
+- Phone only: ~3–5 min/100 contacts. Use 900s timeout.
+- Email only or both: 30–90 min. Use 3600s timeout.
+- `on hold` = credits exhausted, batch paused — no cancel endpoint.
+
+### Parse
+```python
+for entry in result.get("data", []):
+    cf = entry.get("custom_fields", [])  # ARRAY, not dict
+    row_id = next((f["value"] for f in cf if f.get("name") == "row_id"), "")
+    phone = entry.get("contact_phone_number") or ""
+    email = entry.get("contact_email_address") or ""
+    email_status = entry.get("contact_email_address_status") or ""
+```
+
+### Key Notes
+- Base URL: `app.bettercontact.rocks` (not `api.`)
+- Max 100 contacts per batch
+- Submit response key: `id` (not `task_id` or `request_id`)
+- `status` for completion: `"terminated"`, not `"completed"`
+- `custom_fields` sent as object `{"key": "val"}`, returned as **array**: `[{"name": "key", "value": "val", "position": 0}]`
+- Email field: `contact_email_address`, status: `contact_email_address_status`
+- Phone field: `contact_phone_number`
+- `enriched: False` entries can still have email values — these are low-confidence (catch_all_not_safe). Count but flag.
+- Summary `total` field excludes `not_found` — use `len(data)` for verification
+
+### Cost
+- Email only: ~0.35 cr/contact
+- Phone only: ~1–2 cr/contact
+- Can spike to 7+ cr/contact for enterprise audiences (complex email infra)
+
+### Docs
+https://doc.bettercontact.rocks
+
+---
+
+## Provider 4: Pipe0 LinkedIn URL (When Missing)
+
+**Pipe ID:** `people:profileurl:name@1`
+
+### Request
+```json
+{
+  "config": {"environment": "production"},
+  "pipes": [{"pipe_id": "people:profileurl:name@1"}],
+  "input": [
+    {"id": "1", "name": "John Smith", "company_name": "Example Inc", "location_hint": "United States"}
+  ]
+}
+```
+
+### Cost
+0.60 credits/operation
+
+---
+
+## Provider 5: Pipe0 Phone Pipes
+
+**Pipe IDs:**
+- `people:phone:profile:waterfall@1` — input: `profile_url` (LinkedIn URL)
+- `people:phone:workemail:waterfall@1` — input: `work_email`
+
+### Cost
+2.00–7.00 credits/operation
+
+### Known Coverage
+- **DACH:** **~92% hit rate (n=74)**, April 2026 DACH e-commerce SME run — response field is `mobile`, not `phone`
+- **SA:** 0% hit rate observed — skip for SA audiences
+- Solid as both **primary** (when contacts come from Pipe0 search → no FE phone available) and **FE-fallback** (71% recovery on FE contacts missing phones, n=7). Use FE first if the contact already went through FE search/enrich (you've paid for it); use Pipe0 waterfall on the remainder.
+
+---
+
+## Output
+
+Updated CSV at `csv/output/contacts_enriched.csv` with added columns:
+```
+email, email_status, email_source,
+phone, phone_source
+```
+
+All original columns preserved.
+
+---
+
+## Troubleshooting
+
+### Pipe0: Task processing timeout
+Batch too large. Keep batches ≤100 contacts. Re-poll task_id — partial results may be in `records`.
+
+### Pipe0: CreditBalanceInsufficient
+Batch fails but credits for provider responses are consumed. Top up, save task_id, do NOT resubmit. New batch for failed records only.
+
+### BetterContact: Job never terminates
+Timeout too short. Phone: 900s min. Email: 3600s min.
+
+### BetterContact: custom_fields parse error
+`custom_fields` is an array `[{"name": "row_id", "value": "0"}]`, not a dict.
+
+### FullEnrich: 404 on results
+Wrong path. Correct: `https://app.fullenrich.com/api/v2/contact/enrich/bulk/{enrichment_id}`
+
+### FullEnrich: Phone field empty
+Prefer `contact_info.most_probable_phone.number` (typically mobile) over `phones[0].number` (can be landline). If `most_probable_phone` is absent, fall back to `phones[0]`. If both empty, fall back to Pipe0 `people:phone:profile:waterfall@1` on the LinkedIn URL.
+
+---
+
+## What's Missing (To Document)
+
+- Pipe0 phone pipe coverage by geography (currently only DACH/SA tested)
+- FullEnrich v2 phone hit rates by geography
+- BetterContact email-only production hit rates outside SA

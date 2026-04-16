@@ -1,0 +1,14 @@
+# Personal config (agent IDs, env paths)
+skills/_shared/local.md
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+*.env

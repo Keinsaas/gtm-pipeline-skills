@@ -64,7 +64,7 @@ Copy `.env.example` to your env file and fill in:
 
 | Key | Provider | Cost Model |
 |-----|----------|-----------|
-| `PIPE0_API_KEY` | pipe0.com | Per page / per record |
+| `PIPE0_API_KEY` | pipe0.com | Credits per task |
 | `FULLENRICH_API_KEY` | fullenrich.com | Per enrichment |
 | `SERPAPI_API_KEY` | serpapi.com | Per search |
 | `PARALLEL_API_KEY` | parallel.ai | Per task (processor-based) |

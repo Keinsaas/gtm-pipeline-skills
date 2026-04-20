@@ -1,8 +1,10 @@
 # GTM Pipeline Skills
 
-Ten Claude Code skills for building B2B lead generation pipelines — from company discovery to enriched contacts ready for outreach.
+Ten Claude Code skills for building efficient B2B lead generation pipelines — from company discovery to enriched contacts ready for outreach. Using these get you Clay quality data for 10-20% of the price.
 
 Each skill is a standalone Markdown instruction file that Claude reads and executes as an agent. Use them individually or chain them into a full pipeline.
+
+We are using ONLY the best and latest data providers and enrichment services and are not associated or affiliated with any of them. 
 
 ---
 

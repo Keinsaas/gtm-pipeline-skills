@@ -11,7 +11,7 @@ We are using ONLY the best and latest data providers and enrichment services and
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/gtm-pipeline-skills
+git clone https://github.com/Keinsaas/gtm-pipeline-skills
 cd gtm-pipeline-skills
 ./install.sh
 ```
@@ -131,6 +131,14 @@ skills/_shared/local.md     ← gitignored, created from local.example.md by ins
 ## For Production Integration
 
 The skills handle data logic (enrichment, scoring, filtering). For automated production pipelines — webhook triggers, n8n orchestration, monitoring, scheduled runs — that's a separate integration layer. The skills are designed to compose with any orchestrator.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Fork the repo, make changes on a branch, submit a PR to `main`.
+
+The `stable` branch is the maintainer's production copy — contributions go to `main`.
 
 ---
 

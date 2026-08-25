@@ -303,7 +303,7 @@ result to `csv/output/`.
    - **List bar** carries a **Download-CSV button** (`.dl`) beside the Expand-all toggle; the
      footer carries a **big CTA button** (`.cta-btn`) linking to the client's booking URL
      (`{{CALENDAR_URL}}` — ask for it, or leave the token if unknown). These two elements are the
-     grafted-in pieces; the rest is the nextbike combined-deck look.
+     grafted-in pieces; the rest is the standard combined-deck look.
    - **`{{CSV_DATA}}`**: embed the sanitized `csv/output/` rows as an escaped JS string (`\r\n`
      line endings; quote any field containing a comma) so the Download button emits a real CSV
      offline — no server. Set `{{CSV_FILENAME}}` to `{client-slug}_prospects.csv`.

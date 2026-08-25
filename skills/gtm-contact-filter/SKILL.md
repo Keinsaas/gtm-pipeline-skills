@@ -32,8 +32,8 @@ Contact-filter classifies on company-level fields (`company_employee_count`, `co
 | PB Sales Navigator Account Scraper | employee_count, hq, industry, growth metrics | Free (PB plan + SN account) |
 | PB LinkedIn Company Scraper | Full company page data | Free (PB plan + LinkedIn account) |
 | FullEnrich Company Finder | employee_count, hq, industry | 0.25 credits/company |
-| Pipe0 `companies:profiles:amplemarket@1` | employee_count, hq, industry | 2.00 credits/page (100 results) |
-| Pipe0 `companies:profiles:crustdata@1` | employee_count, hq, industry | 2.00 credits/page (100 results) |
+| Pipe0 `companies:profiles:amplemarket@2` | employee_count, hq, industry | 2.00 credits/page (100 results) |
+| Pipe0 `companies:profiles:crustdata@3` | employee_count, hq, industry | **0.15 credits per result** (not per page) |
 
 **Where company data typically comes from:**
 - **Company-First workflow:** Already enriched in the company-enrichment step.

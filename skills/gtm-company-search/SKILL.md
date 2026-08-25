@@ -106,22 +106,33 @@ Use this when you already need contacts AND want to build/verify the company lis
 
 Both tools also offer **free dashboard search** for one-time manual company lookups.
 
-### From Pipe0 Amplemarket (company search)
+### From Pipe0 (company search)
 
-**Endpoint:** `POST https://api.pipe0.com/v1/searches/run/sync`
-**Search ID:** `companies:profiles:amplemarket@1`
-**Auth:** `Authorization: Bearer $PIPE0_API_KEY`
+**Endpoint:** `POST https://api.pipe0.com/v1/search/run/sync` — **singular `search`**. The plural
+`/v1/searches/*` is a different schema with a different body shape (`searches: [...]`, and it is the
+only place `config.dedup` exists); posting the body below to it fails.
+
+| Search ID | Filters | Billing |
+|---|---|---|
+| `companies:profiles:crustdata@3` | 27 | **0.15 credits per result** — `cursor` pagination |
+| `companies:profiles:amplemarket@2` | 14 | 2.00 credits per page of 100 — `page_number` pagination |
+| `companies:entitysearch:parallel@1` | 0 (free-text `objective`) | 0.50 credits per page |
+
+`filters` is REQUIRED and may not be empty for the two profile searches. Verify every filter name,
+value form and enum against the vendored catalog before sending — unknown keys are silently dropped
+and billed. Sources and the people-side equivalents: **people-search skill → Pipe0 Searches**.
 
 ```json
 {
-  "config": {"environment": "production", "dedup": {"strategy": "default"}},
-  "searches": [{
-    "search_id": "companies:profiles:amplemarket@1",
+  "config": {"environment": "production"},
+  "search": {
+    "search_id": "companies:profiles:amplemarket@2",
     "config": {
+      "page_number": 1,
       "limit": 100,
-      "filters": {}
+      "filters": {"locations": {"include": ["Munich, Bavaria, Germany"]}}
     }
-  }]
+  }
 }
 ```
 
@@ -136,7 +147,9 @@ for r in results:
     match   = r.get("amplemarket_company_match", {}).get("value", "")
 ```
 
-**Cost:** 2.00 credits per page (100 results), per-search billing
+**Cost:** 2.00 credits per page (100 results). Crustdata bills **per result returned**, so its
+`limit` IS the cost ceiling; Amplemarket bills the whole page whatever you ask for, so asking for
+25 throws away 75 rows you already paid for.
 
 ---
 

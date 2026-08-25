@@ -180,8 +180,9 @@ fall through:
    name-only), dedupe by LinkedIn URL, filter locally.
 2. **BetterContact Lead Finder** — for broader / English-market / larger-company segments.
 3. **Pipe0 searches** — last-resort finder when FE+BC return 0 relevant candidates for a company
-   (keyed on the real domain, it recovers companies the others miss).
-4. **Amplemarket / Crustdata** — final tier, max 2 attempts each, for whatever still has no contact.
+   (keyed on the real domain, it recovers companies the others miss). Order within Pipe0:
+   `amplemarket@2` (3.00 flat for up to 100 rows) → `crustdata@3` (0.15/result, 3.75 worst case at
+   `limit: 25`) → `parallel@1` (0.50, prose objective). Max 2 attempts each.
 
 **Fallback trigger = zero *relevant* contacts, not zero rows.** A provider can return many rows
 that are all a *different* company (fuzzy name collision) — cross-check each candidate's returned
@@ -308,11 +309,18 @@ def pipe0_request(method, path, body=None):
 ```
 
 **Base URLs:**
-- Searches (sync): `POST /v1/searches/run/sync`
-- Searches (async): `POST /v1/searches/run`
+- Searches (sync): `POST /v1/search/run/sync` — **singular `search`**
+- Searches (async): `POST /v1/search/run`
 - Pipes: `POST /v1/pipes/run`
 - Check pipe status: `GET /v1/pipes/check/{task_id}`
 - Sandbox mode: `"config": {"environment": "sandbox"}` — free, validates structure only
+
+**Search bodies are built, not written.** The three searches we use (`people:profiles:crustdata@3`, `people:profiles:amplemarket@2`, `people:entitysearch:parallel@1`), their filters, enums, costs and response paths are documented in the **people-search skill, Provider E**; the implementation is `scaleway-jobs/_shared/pipe0_payload.py` + its TS twin `src/lib/contacts/pipe0-payload.ts` with the vendored catalog in `scaleway-jobs/_shared/pipe0_catalog/`. Four rules apply to every Pipe0 search call, and each cost real money to learn:
+
+1. **Unknown filter keys are silently dropped** — 200, fully billed, key ignored. Validate keys against the catalog; when probing whether a key exists, send it alone (a bogus key 422s with "You must set at least one filter").
+2. **Free-text filter values are NOT validated** — an unrecognised region string is accepted and silently widens the search instead of erroring. Resolve regions/industries against the catalog; drop and warn on anything unresolved, never send it raw.
+3. **Every filter is advisory** — out-of-range headcounts and off-target titles come back anyway. Filters are a cost optimisation; the local re-verification pass is the only guarantee.
+4. **Filter enums carry thousands separators (`501-1,000`), responses do not (`501-1000`)** — never compare the two forms directly.
 
 ---
 
@@ -341,6 +349,8 @@ All CSV outputs use **snake_case**. When ingesting data from providers that use 
 | `location` | `location` | `location` | `location` |
 
 **When a skill outputs CSV:** use canonical names. **When a skill ingests CSV from a provider:** map to canonical names before writing the intermediate file.
+
+**Pipe0 search rows are wrapped** — every output field is `{"value": …}`, so read `row["profile_url"]["value"]`, not `row["profile_url"]`. The Pipe0 column above is the enrichment-pipe vocabulary; search rows expose far fewer fields (`crustdata@3` has no `job_title` at all — title and company come out of `person_profile_match`). Per-search field maps: people-search skill, Provider E → Response shapes.
 
 ---
 
@@ -371,5 +381,5 @@ Several providers have similarly-named products. Be explicit about which is mean
 | **BetterContact async enrichment** | people-enrichment | Async email/phone enrichment | Slow due to multi-provider waterfall. Email hit rate is low (~14% in our tests) — **prefer FullEnrich for email**. Acceptable for phone if user has patience. |
 | **FullEnrich Finder** | people-search | People discovery (returns LinkedIn URLs) | Required upstream of FullEnrich Enrich for email |
 | **FullEnrich Enrich (v2)** | people-enrichment | Email + phone enrichment | Faster and more reliable than BC for email; has MCP support |
-| **Pipe0 searches** | people-search, company-search | Discovery — finds new entities | `searches:profiles:*` |
+| **Pipe0 searches** | people-search, company-search | Discovery — finds new entities | `people:profiles:crustdata@3`, `people:profiles:amplemarket@2`, `people:entitysearch:parallel@1` |
 | **Pipe0 pipes** | people-enrichment | Enrichment — augments existing entities | `pipes/run` waterfall |

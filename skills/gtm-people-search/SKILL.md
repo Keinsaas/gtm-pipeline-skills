@@ -61,18 +61,19 @@ Env var: `SERPAPI_API_KEY`
 
 ### Company mode (have company list)
 
-**Finder cadence (segment-routed waterfall): FullEnrich Finder → BetterContact Lead Finder → Pipe0 searches → Amplemarket / Crustdata (last resort). Max 2 attempts per source (e.g. a title-token query then a name-only query), then fall through. Lead with FullEnrich for SME / owner-led / non-English-market segments (better indexed there); lead with BetterContact for broader / English-market / larger companies. Add a Pipe0 pass on whatever the finders missed — different index, additive coverage. See conventions "People-Source Cadence" for the full waterfall and fallback rule; the table below is per-provider mechanics and cost, not a fixed running order.**
+**Finder cadence (segment-routed waterfall): FullEnrich Finder → BetterContact Lead Finder → Pipe0 searches (`amplemarket@2` → `crustdata@3` → `parallel@1`, last resort). Max 2 attempts per source (e.g. a title-token query then a name-only query), then fall through. Lead with FullEnrich for SME / owner-led / non-English-market segments (better indexed there); lead with BetterContact for broader / English-market / larger companies. Add a Pipe0 pass on whatever the finders missed — different index, additive coverage. See conventions "People-Source Cadence" for the full waterfall and fallback rule; the table below is per-provider mechanics and cost, not a fixed running order.**
 
 | Priority | Provider | Cost | LinkedIn URLs | Key Strength |
 |----------|----------|------|---------------|-------------|
 | 1st | **BetterContact Lead Finder** | 0.10 cr/request | Yes | Cheaper fixed cost; good for high-volume batches |
 | 2nd | **FullEnrich Finder** | 0.25 cr/person | Yes | Richest filters; richer fields (seniority, headcount, industry) |
-| 3rd | **Pipe0 Amplemarket** | 3.00 cr/page (≤100 results) | Yes | **Cheap waterfall for FE/BC misses** — separate index covers different shops (+36% shop coverage on DACH SMEs where FE had 0 hits). Supports company domain + name filters |
-| 4th | **Pipe0 Crustdata** | 5.00 cr/page | Yes | Final fallback — low additive value when run after Amplemarket (+1 shop out of 81 in DACH test) |
-| 5th | **PhantomBuster Company Employees Export** | Free (LinkedIn account) | Yes | Good when SN not available; scrapes directly from LinkedIn company page |
-| 6th | **PhantomBuster SN Search Export** | Free (SN account) | Yes | Full SN search power; use when you have a saved SN search URL |
+| 3rd | **Pipe0 `amplemarket@2`** | 3.00 cr/page, **flat** (1 page = 100 records) | Yes | **Cheap waterfall for FE/BC misses** — separate index covers different shops (+36% shop coverage on DACH SMEs where FE had 0 hits). Company domain + name filters. Always ask for `limit: 100` — 25 costs the same |
+| 4th | **Pipe0 `crustdata@3`** | 0.15 cr **per result returned** (`limit: 25` → 3.75 worst case) | Yes | Richest filter set (29). Low additive value when run after amplemarket (+1 shop out of 81 in DACH test) |
+| 5th | **Pipe0 `parallel@1`** | 0.50 cr flat | Yes | AI entity search — no filters at all, every criterion goes in the objective prose. Use when the structured searches return 0 |
+| 6th | **PhantomBuster Company Employees Export** | Free (LinkedIn account) | Yes | Good when SN not available; scrapes directly from LinkedIn company page |
+| 7th | **PhantomBuster SN Search Export** | Free (SN account) | Yes | Full SN search power; use when you have a saved SN search URL |
 
-**Indexes barely overlap on small EU SMEs** — running FE → Amplemarket → Crustdata is additive, not redundant. In an April 2026 DACH e-commerce run (81 FE-missed shops): Amplemarket recovered 29 shops (74 contacts, 35%), Crustdata added 1 more shop as fallback. Always run cheapest provider first.
+**Indexes barely overlap on small EU SMEs** — running FE → `amplemarket@2` → `crustdata@3` is additive, not redundant. In an April 2026 DACH e-commerce run (81 FE-missed shops): amplemarket recovered 29 shops (74 contacts, 35%), crustdata added 1 more shop as fallback. Amplemarket stays first: 3.00 flat for up to 100 rows beats crustdata's 3.75 worst case for 25.
 
 **Two-tier search pattern** (proven on EU e-commerce campaigns):
 1. **Tier 1** — E-commerce + Marketing titles (always run)
@@ -88,8 +89,11 @@ When PhantomBuster is selected: read `_shared/phantombuster.md` and use the `/ph
 |----------|----------|------|-------------|
 | 1st | **Parallel FindAll** | varies by processor | Discover people matching criteria from web sources |
 | 2nd | **BetterContact Search** | TBD | Search without company filter |
-| 3rd | **Pipe0 Amplemarket** | 3.00 cr/page | Structured filters (location, industry, employer revenue, founded year, departments, seniority) |
-| 4th | **Pipe0 Crustdata** | 5.00 cr/page | Richest persona filters (experience, seniority, skills, education, certifications, career movement) |
+| 3rd | **Pipe0 `crustdata@3`** | 0.15 cr/result | Richest persona filters (29): headcount brackets, industries, seniority, tenure, skills, education, career movement |
+| 4th | **Pipe0 `amplemarket@2`** | 3.00 cr/page | Structured filters (21): location, headcount, LinkedIn industry, employer revenue, founded year, departments, seniority, funding, follower level, b2b/b2c |
+| 5th | **Pipe0 `parallel@1`** | 0.50 cr | Prose criteria that no filter expresses (keywords, signals, free-text ICP brief) |
+
+**Persona mode has no company anchor, so an unfiltered search is a fully-billed market-wide dump.** Never send a persona search without both a title list and at least one resolved region — the repo's builder raises on either being empty (see Provider E).
 
 **Do NOT use Parallel Task enrichment for people** — model guesses titles, returns wrong roles. Use FindAll.
 
@@ -355,130 +359,184 @@ Always check latest docs via context7 (`libraryName: parallel-web`) before build
 
 ---
 
-## Provider E: Pipe0 Amplemarket (Filter-Based)
+## Provider E: Pipe0 Searches (`crustdata@3` / `amplemarket@2` / `parallel@1`)
 
-**Endpoint:** `POST https://api.pipe0.com/v1/search/run/sync` (singular `search`)
-**Search ID:** `people:profiles:amplemarket@1`
+**Endpoint:** `POST https://api.pipe0.com/v1/search/run/sync` (singular `search`; `/v1/search/run` = async)
 **Auth:** `Authorization: Bearer $PIPE0_API_KEY`
-**Use curl** — Python requests blocked by Cloudflare.
-**Best for:** Company-mode fallback when FE/BC miss (cheap at 3 cr/page) AND persona-mode filter search.
+**Use curl** — Python requests blocked by Cloudflare (conventions rule #8).
+**Sandbox is free and validates the request schema** — `{"config": {"environment": "sandbox"}}` returns fake rows. Probe every new body shape there before spending a credit.
 
-### Request (Company Mode)
+**Do not hand-write these bodies.** The repo owns a verified builder that maps an ICP onto all three searches, resolves regions/industries against a vendored catalog, validates every key against the schema and returns `(body, warnings)`:
+
+| What | Where |
+|---|---|
+| Builder (Python twin) | `scaleway-jobs/_shared/pipe0_payload.py` → `build_body(search_id, icp)` |
+| Builder (TS twin) | `src/lib/contacts/pipe0-payload.ts` → `buildBody(searchId, icp)` |
+| Vendored catalog | `scaleway-jobs/_shared/pipe0_catalog/{searches,regions,industries,industry_aliases}.json` — filter schemas + enums + per-filter `max`, 46,469 regions, 435 + 501 industries, 422 DE→EN industry aliases (source: `industries_de_en.csv`) |
+| Callers | `scaleway-jobs/contact-search/search.py`, `src/lib/contacts/local-search.ts` |
+
+Import it or copy its mapping; never reconstruct filters from memory. **`@1` search ids and their filter names (`current_employers`, `current_employer_website_urls`, `current_employers_linkedin_industries`, `profile_summary_keywords`) do not exist** — any script referencing them is pre-2026-08-12 and wrong.
+
+### Envelope (all three)
+
 ```json
-{
-  "config": {"environment": "production", "dedup": {"strategy": "default"}},
-  "search": {
-    "search_id": "people:profiles:amplemarket@1",
-    "config": {
-      "limit": 5,
-      "filters": {
-        "current_employer_website_urls": {"include": ["example.com"]},
-        "current_employer_names":        {"include": ["Example GmbH"]},
-        "current_job_titles": ["CEO", "Geschäftsführer", "Founder", "Head of Marketing"],
-        "current_locations": {"include": ["Germany"]}
-      }
-    }
-  }
-}
+{"config": {"environment": "production"},
+ "search": {"search_id": "<id>", "config": { }}}
 ```
 
-### ⚠ Filter Format Gotcha (Amplemarket-specific)
-- **`current_job_titles` must be a PLAIN ARRAY** (`["CEO", "Founder"]`), NOT `{"include": [...]}` like the other fields. Crustdata uses the object form. Getting it wrong → 422 validation error.
-- Most other filters use the `{"include": [...], "exclude": [...]}` object form.
+`config.dedup` exists only on the plural `/v1/searches/*` schema — omit it here.
 
-### Available Filters (discovered via sandbox probe)
-```
-person_names, school_names,
-current_locations, current_job_titles, current_departments,
-current_job_functions, current_seniority_levels,
-current_employer_names, current_employer_website_urls,
-current_employer_linkedin_industries, current_employer_locations,
-current_employer_investors, current_employer_founded_year,
-current_employer_estimated_revenue, current_employer_open_positions_titles
+| Search ID | Cost | `search.config` keys |
+|---|---|---|
+| `people:profiles:crustdata@3` | **0.15 cr per result returned** — `limit` IS the cost ceiling (25 → 3.75 worst case) | `limit`, `cursor`, `output_fields`, **`filters` (required)** |
+| `people:profiles:amplemarket@2` | **3.00 cr per page, flat** — 1 page = 100 records, so `limit: 25` throws away 75 free rows | `limit`, `page_number`, `output_fields`, **`filters` (required)** |
+| `people:entitysearch:parallel@1` | **0.50 cr flat** | **`objective` (required, free text)**, `limit` (**min 5**), `output_fields` |
+
+`output_fields` values are `{"enabled": true, "alias": ""}`; all default to enabled.
+
+### `crustdata@3` — 29 filters
+
+**Object `{"include": [...], "exclude": [...]}` (19):** `about_section_keywords`, `certifications`, `current_employer_domains`, `current_employer_industries`, `current_employer_names`, `current_employment_job_titles`, `current_school_names`, `degree_names`, `fields_of_study`, `honors`, `languages`, `locations`, `previous_employer_domains`, `previous_employer_industries`, `previous_employer_names`, `previous_employment_job_titles`, `profile_headline_keywords`, `school_names`, `skills`
+
+**Plain array of enum (9):** `current_employer_headcount_brackets`, `current_employment_job_functions`, `current_employment_seniority_levels`, `current_employment_tenure_brackets`, `total_years_of_experience_brackets`, plus the `previous_employer_headcount_brackets` / `previous_employment_job_functions` / `previous_employment_seniority_levels` / `previous_employment_tenure_brackets` mirrors
+
+**Scalar (1):** `recently_changed_jobs` (boolean | null)
+
+Enums:
+- headcount brackets (8) — **note the thousands separators**: `1-10`, `11-50`, `51-200`, `201-500`, `501-1,000`, `1,001-5,000`, `5,001-10,000`, `10,001+`
+- job functions (12): Engineering, Sales, Consulting, Marketing, Operations, Finance, Research, Customer Success and Support, Arts and Design, Human Resources, Legal, Product Management
+- seniority levels (10): Owner / Partner, CXO, Vice President, Director, Experienced Manager, Entry Level Manager, Strategic, Senior, Entry Level, In Training
+- tenure brackets + total years of experience (5 each): Less than 1 year, 1 to 2 years, 3 to 5 years, 6 to 10 years, More than 10 years
+- `locations` / `current_employer_industries` are free text validated against `regions.json` (46,469) / `industries.json` (435) — see Operational Rules
+
+```json
+{"config": {"environment": "production"},
+ "search": {"search_id": "people:profiles:crustdata@3", "config": {
+   "cursor": "", "limit": 25,
+   "filters": {
+     "current_employer_domains": {"include": ["example.com"]},
+     "current_employment_job_titles": {"include": ["Geschäftsführung"], "exclude": ["Praktikant"]},
+     "locations": {"include": ["Munich, Bavaria, Germany"]},
+     "current_employer_headcount_brackets": ["51-200", "201-500"]}}}}
 ```
 
-### Response
+### `amplemarket@2` — 21 filters
+
+**Plain array of string (4):** `current_job_titles`, `current_employer_investors`, `current_employer_open_position_titles`, `school_names`
+**Plain array of enum (5):** `current_departments` (14), `current_seniority_levels` (14), `current_job_functions` (196), `current_employer_linkedin_industries` (501), `current_employer_estimated_revenue` (5: `$0-$1M`, `$1M-$10M`, `$10M-$100M`, `$100M-$1B`, `$1B+`)
+**Object `{"include": [...], "exclude": [...]}` (4):** `current_locations`, `current_employer_locations` (← employer **HQ**, not the person), `current_employer_names`, `current_employer_domains`
+**Range `{"min": …, "max": …}` (1):** `current_employer_founded_year`
+**Scalar (1):** `person_name` (string | null)
+
+- departments (14): Senior Leadership, Consulting, Design, Education, Engineering & Technical, Finance, Human Resources, Information Technology, Legal, Marketing, Medical & Health, Operations, Product, Revenue
+- seniority (14): Owner, Founder, C-Suite, Partner, VP, Head, Director, Manager, Senior, Entry, Intern, Other, Non-Manager, Founder / Owner
+- the 196 job functions and 501 industries live in the catalog — never guess one; **an unresolved industry value 422s the whole call**
+
+⚠ **`current_job_titles` is a PLAIN ARRAY** (`["CEO", "Founder"]`), not the object form — and therefore **has no `exclude` arm**. Enforce exclusions locally.
+⚠ **`current_employer_headcount_brackets` uses the SAME enum as crustdata** (`1-10 … 501-1,000 … 10,001+`, with thousands separators) — Pipe0 harmonised the two on 2026-08-12; an earlier catalog carried an `" employees"` suffixed variant and every value 422d. Read the enum from the catalog per search anyway; never re-type it. The *response* bracket still has no separators (`501-1000`).
+⚠ **`current_job_titles` caps at 50 options and the cap is NOT in the schema.** Over-sending is not a 4xx: the call returns **HTTP 200 with `status: "failed"`, `results: []` and a full charge**, the reason only in `errors[0]` (`'person_titles' exceeds the maximum options per filter (50)`). Declared caps (spec `maxItems`) are 20 for `current_employer_linkedin_industries`, `current_job_functions`, `current_employer_investors`, `school_names`. **Always check `status` and `errors` — an empty `results` alone reads as "no matches".** Both twins trim + warn; crustdata has no title cap.
+(Shipped 2026-08-12 — before that this search had no size filter at all, which is why older notes say to narrow locally. `current_employer_estimated_revenue` is still a different axis; do not substitute it.)
+
+Also new on 2026-08-12: `current_employer_customer_types` (b2b/b2c), `current_employer_last_funding_round_types` (20), `current_employer_last_funding_within`, `current_employer_linkedin_follower_levels` (5), `linkedin_follower_levels` (6). None map to an ICP field today.
+
+```json
+{"config": {"environment": "production"},
+ "search": {"search_id": "people:profiles:amplemarket@2", "config": {
+   "page_number": 1, "limit": 100,
+   "filters": {
+     "current_employer_domains": {"include": ["example.com"]},
+     "current_job_titles": ["Geschäftsführung", "Head of Marketing"],
+     "current_locations": {"include": ["Munich, Bavaria, Germany"]}}}}}
+```
+
+### `parallel@1` — 0 filters
+
+AI entity search. Every criterion — titles, size, industry, region, exclusions — goes into `objective` prose, and **nothing is validated**, so the objective must state each constraint explicitly. It is the only search that should receive raw client strings (unresolved locations, untranslated industries, keywords, the ICP description).
+
+```json
+{"config": {"environment": "production"},
+ "search": {"search_id": "people:entitysearch:parallel@1", "config": {
+   "limit": 25,
+   "objective": "People whose current job title is one of: … (or the German or English equivalent). Employed at organisations with between 51 and 5000 employees. Located in … . Exclude anyone whose title contains: … .",
+   "output_fields": {"name": {"enabled": true}, "job_title": {"enabled": true},
+                     "profile_url": {"enabled": true},
+                     "parallel_person_entity_match": {"enabled": true}}}}}
+```
+
+### Response shapes
+
+Every output field is wrapped as `{"value": …}`. Results are in `response["results"]`.
+
 ```python
 results = response.get("results", [])
-for r in results:
-    name    = r.get("name", {}).get("value", "")
-    title   = r.get("job_title", {}).get("value", "")
-    li_url  = r.get("profile_url", {}).get("value", "")
-    co_url  = r.get("company_website_url", {}).get("value", "")
-    match   = r.get("amplemarket_person_match", {}).get("value", {})  # rich company/person dict
+v = lambda r, k: (r.get(k) or {}).get("value")
 ```
 
-### Key Notes
-- **Fuzzy title match**: titles are OR-matched loosely. A request for `["CEO", "Founder"]` returned a "Product Owner" at one of the test shops. Post-filter on title if strict role matching matters.
-- Location/country filter is highly reliable — use it.
-- **Sandbox is free** (`"environment": "sandbox"`) — always probe filter shape with 1 record before spending credits. Sandbox returns fake data but validates the request schema.
+| Search | Output fields | Where the company/title actually is |
+|---|---|---|
+| `crustdata@3` | `name`, `profile_url`, `person_profile_match` — **no `job_title` field** | `person_profile_match`: `primary_job_title`, `headline`, `highest_current_seniority_level`, `current_location_city`, `current_location_country`, and `employment_history[]` — the entry flagged `is_primary_current_employer` carries `company_name`, `company_domain`, `company_profile_url`, `company_hq_region`, `headcount_bracket`, `company_industries[]`, `start_date` |
+| `amplemarket@2` | `name`, `job_title`, `profile_url`, `company_domain`, `amplemarket_person_match` | `amplemarket_person_match`: `first_name`, `last_name`, `title`, `linkedin_url`, `location`, `headline`, `current_position_start_date`, `company.{name, website, size}` |
+| `parallel@1` | `name`, `job_title`, `profile_url`, `parallel_person_entity_match` | `parallel_person_entity_match`: `current_company` (dict or string), `headline`, `experience_raw` |
 
-### Cost
-3.00 credits per page (up to 100 results). Paying per page — so `limit: 5` still costs 3 cr.
+⚠ `primary_company_domain` / `primary_job_title` / `primary_seniority` are output fields of the **enrichment pipe**, not of the crustdata *search*. Reading `person_profile_match.primary_company_domain` off a search row returns `""` — silently, and after the row is billed, so employer verification keyed on it fails for every row. Read `employment_history[]` first, fall back to `primary_company_domain`.
 
-### DACH SME Hit Rate
-- Company-mode on FE-missed DACH e-commerce SMEs: **28/81 shops (35%)** as primary search
-- Avg 2.5 contacts per hit shop, 74 contacts total
-- Company filter accepts both `current_employer_names` and `current_employer_website_urls`; domain form works with or without `https://` prefix
+### Operational Rules (each one cost real money to learn)
 
----
+1. **Unknown filter keys are silently dropped.** Pipe0 returns 200, bills the search as if unfiltered, and ignores the key. There is no runtime signal. **Discriminator when probing a key:** send it as the *only* filter — a bogus key 422s with "You must set at least one filter"; a real one runs. The builder's `_put()` raises on any key not in the catalog, and `chain_audit.py` enforces key parity between the twins.
+2. **Values inside free-text include-lists are NOT validated.** An unrecognised region string is accepted and quietly widens/garbles the result set instead of erroring — metro-area and suburb forms (`Munich Metropolitan Area`, `Berlin/Brandenburg Metropolitan Area`, `Garching bei München, Bavaria, Germany`) are the common offenders, and out-of-country profiles then leak in. **Every region must be resolved against `regions.json`; anything unresolved is dropped and warned, never sent raw.** Valid forms: `Munich, Bavaria, Germany`, `Greater Munich Metropolitan Area`, `Berlin, Germany`. Never auto-widen a city to its state — `Hamburg, Alabama`, `Berlin, Ohio`, `Vienna, Georgia` all exist, and widening silently re-targets the client.
+3. **Even valid enum filters are advisory.** Headcount brackets outside the requested range come back anyway, and a title list of `["CEO", "Founder"]` will still return a Product Owner. Filters are a **cost optimisation, never a guarantee** — widen at the provider, narrow locally. The local pass (title excludes, size check, employer verification, per-company cap) is the only real gate.
+4. **Filter-vs-response bracket format mismatch.** The filter enum carries thousands separators (`501-1,000`), the response bracket does **not** (`501-1000`). Never compare the two forms directly — strip separators before parsing (`size_buckets.parse_bracket` / `bracket_overlaps_buckets` in both twins).
+5. **Never send a persona search without an anchor.** No employer domain + no titles, or no resolved region, = a market-wide fully-billed dump. The builder raises on both.
+6. **Empty filter → omit it**, never `{"include": []}` (either a 422 or a match-everything).
 
-## Provider F: Pipe0 Crustdata (Filter-Based)
+### ICP → filter mapping
 
-**Endpoint:** `POST https://api.pipe0.com/v1/search/run/sync` (singular `search`)
-**Search ID:** `people:profiles:crustdata@1`
-**Best for:** Last-resort fallback after Amplemarket. Also strong for persona searches needing experience/seniority/skill filters.
+`✅` clean · `⚠️` expressible but advisory, re-verify locally · `❌` not expressible, local only. Implemented in `pipe0_payload.py` / `pipe0-payload.ts` — this table is the spec, the builder is the truth.
 
-### Request (Company Mode — yes, Crustdata DOES support company filters)
-```json
-{
-  "config": {"environment": "production", "dedup": {"strategy": "default"}},
-  "search": {
-    "search_id": "people:profiles:crustdata@1",
-    "config": {
-      "limit": 5,
-      "filters": {
-        "current_employers_website_urls": {"include": ["example.com"]},
-        "current_employers":              {"include": ["Example GmbH"]},
-        "current_job_titles":             {"include": ["CEO", "Geschäftsführer"]},
-        "locations":                      {"include": ["Germany"]}
-      }
-    }
-  }
-}
-```
+| ICP field (`workflow_config`) | `crustdata@3` | `amplemarket@2` | `parallel@1` |
+|---|---|---|---|
+| `target_job_titles_tier1` + `tier2` | ✅ `current_employment_job_titles.include` | ✅ `current_job_titles` (bare array) | prose, ≤20 values |
+| `exclude_job_titles` | ✅ `.exclude` arm of the same filter — but drop any value under 4 folded chars (`IT` is a substring of `Leitung`) or contained in an included title (`Assistenz` vs `Assistenz der Geschäftsführung`) | ❌ no exclude arm → local only | prose |
+| `target_locations` (person) | ⚠️ `locations.include`, resolved | ⚠️ `current_locations.include`, resolved | prose, **raw** strings (an LLM reads "Garching" better than a canonical row) |
+| `target_locations` (company HQ) | — | **never map** to `current_employer_locations` — that is employer HQ, which inverts a "staffed local site" criterion | — |
+| `target_company_sizes` | ⚠️ `current_employer_headcount_brackets`, **widened** (our `51-250` → `51-200` + `201-500`) | ⚠️ same filter, same enum, widened the same way | prose ("between 51 and 5000 employees") |
+| `target_industries` | ⚠️ `current_employer_industries.include`, resolved against the 435 list; unresolved → omit | ⚠️ `current_employer_linkedin_industries`, resolved against the 501 enum; **one bad value 422s the call**; capped at 20 | prose, raw |
+| ↳ German industry labels | ✅ translated first via `industry_aliases.json` (`Gastgewerbe` → `Hospitality`, `Krankenhäuser und Gesundheitswesen` → `Hospitals and Health Care`). Exact fold-match only — Pipe0 serves the English side alone, and free-form business categories (`Privatkliniken`, `Handel und E-Commerce`) are NOT taxonomy labels and still drop | same | raw |
+| `icp_keywords` | ❌ `profile_headline_keywords` / `about_section_keywords` are **person**-level; company/signal keywords there zero the recall | ❌ | ✅ their only home |
+| `icp_description` | ❌ | ❌ | ✅ composed into the objective, never pasted whole |
+| `max_contacts_per_company` | ❌ | ❌ | ❌ — group by employer after the call |
+| company domain (company mode) | ✅ `current_employer_domains.include` | ✅ `current_employer_domains.include` | in the objective prose |
+| seniority / departments / functions / tenure / `previous_*` | not emitted — no ICP field maps to them, and the vocabularies disagree (`Head` exists on amplemarket, not crustdata) | same | — |
 
-### Filter Format
-- Everything uses the `{"include": [...], "exclude": [...]}` object form — including `current_job_titles`. This is the **opposite** of Amplemarket's plain-array form for titles.
+**Company mode sends fewer filters on purpose:** domain + titles + excludes + person location. Size and industry are already known from the account row; re-asserting them can only drop real employees of the right company.
 
-### Available Filters (discovered via sandbox probe)
-```
-honors, skills, languages, locations,
-degree_names, school_names, certifications, fields_of_study,
-current_employers, current_employers_website_urls,
-current_employers_linkedin_industries,
-current_job_titles, current_school_names, current_seniority_levels,
-previous_employers, previous_employers_website_urls,
-previous_employers_linkedin_industries,
-previous_job_titles, previous_seniority_levels,
-profile_languages, profile_headline_keywords, profile_summary_keywords,
-years_of_experience, years_at_current_company, recently_changed_jobs,
-extracurricular_activities
-```
+Warnings returned by the builder (unresolved regions/industries, dropped excludes, criteria the search cannot express) go to `activity_log.payload.targeting_warnings` — **ops-only**, they name search ids (Hard Rule 5). Most are fixable by the operator with data alone before the next run; that is the point of returning them.
 
-### Response
-Same shape as Amplemarket. Match field: `crustdata_person_match.value`.
+### Refreshing the catalog
 
-### Cost
-5.00 credits per page (100 records). More expensive than Amplemarket — run it AFTER Amplemarket for company-mode fallback, not before.
+`scaleway-jobs/scripts/refresh_pipe0_catalog.py` regenerates the vendored JSON from:
 
-### DACH SME Hit Rate
-- As Amplemarket-fallback on DACH e-commerce SMEs: **1/52 shops Amplemarket missed** = very low additive value. Worth skipping if budget is tight.
-- Stronger in persona mode where its experience/skill/certification filters matter.
+| What | URL |
+|---|---|
+| OpenAPI 3.1 spec (39 searches) | `https://api.pipe0.com/openapi` — schemas at `components.schemas.SearchPayloadSchema.oneOf[]`, keyed by `properties.search_id.enum[0]` (**`.enum[0]`, not `.const`**) |
+| Regions (46,469) | `https://raw.githubusercontent.com/pipe-0/pipe0/main/static/autocomplete/crustdata/regions.csv` |
+| LinkedIn industries (435) | `…/static/autocomplete/crustdata/linkedin_industries.csv` |
+| Other option lists | `…/static/autocomplete/common/{countries,titles,skills,schools,company_names,company_domains}.csv`, `…/crustdata/field_of_study.csv` |
 
-### When NOT to use
-- As primary company-mode search → Amplemarket is 40% cheaper and has comparable DACH coverage
-- If Amplemarket already returned results for the shop → don't double-pay
+It exits 1 when a pinned `search_id` disappears (Pipe0 ships `@4`), when a filter we emit changes form, or when a targeted headcount enum value vanishes.
+
+**Pipe0 adds filters to an EXISTING version in place — the version number does not change.**
+`amplemarket@2` went 15 → 21 filters on 2026-08-12 and grew the headcount filter it had never had —
+a criterion that was simply not expressible on that search the day before. So a stable
+`search_id` is no guarantee the capability set is stable: **re-run the refresher and diff the
+catalog before any large persona run**, and treat "this search cannot express X" as a fact with an
+expiry date, not a permanent limitation.
+
+### DACH SME Hit Rate (company mode)
+
+- `amplemarket@2` on FE-missed DACH e-commerce SMEs: **28/81 shops (35%)**, avg 2.5 contacts per hit shop, 74 contacts total
+- `crustdata@3` as amplemarket-fallback: **1/52 shops** amplemarket missed — very low additive value, skip if budget is tight
+- Company filter accepts `current_employer_names` and `current_employer_domains`; the domain form works with or without the `https://` prefix
 
 ---
 
@@ -498,7 +556,7 @@ All original input columns preserved. Always include a `source` column (e.g. `fu
 
 ## Key Rules
 
-- **Finder cadence: FullEnrich → BetterContact → Pipe0 searches → Amplemarket / Crustdata (last resort), max 2 attempts per source then fall through.** Lead with FullEnrich for SME / owner-led / non-English-market segments; lead with BetterContact for broader / English-market / larger companies. Track each provider's credits separately. See conventions "People-Source Cadence".
+- **Finder cadence: FullEnrich → BetterContact → Pipe0 searches (`amplemarket@2` → `crustdata@3` → `parallel@1`), max 2 attempts per source then fall through.** Lead with FullEnrich for SME / owner-led / non-English-market segments; lead with BetterContact for broader / English-market / larger companies. Track each provider's credits separately. See conventions "People-Source Cadence".
 - **Fallback trigger = zero *relevant* contacts, not zero rows.** A finder can return many rows that are all a *different* company (fuzzy name collision). Cross-check each candidate's returned company (`fe_company_name`) against the target and count only identity-matches before falling through. **Probe 3 companies first**; if the primary source returns 0 relevant on the probe, switch source before the full batch.
 - **Directory/scrape-sourced company lists: search by NAME + location, never by exact domain.** A directory `acme.de` won't match a provider-indexed `acme.com` → 0 results. Validate each candidate by domain-root or name token. See conventions rule #11.
 - **Cloudflare: BC and FE need curl too.** Like Pipe0, BetterContact and FullEnrich are Cloudflare-fronted — Python `requests`/`urllib` get blocked (error 1010). Call all three with `curl` + a browser `User-Agent`; never ship a urllib-based provider script. See conventions rule #8.
@@ -507,6 +565,7 @@ All original input columns preserved. Always include a `source` column (e.g. `fu
 - **BC is async** — submit then poll every 5s until `status == "terminated"`. Typical wait: 30–60s per request. Budget accordingly for large batches.
 - **Senior titles bypass keyword filter** — "Head of", Founder, Director, C-level always pass regardless of excluded keywords (e.g. "Head of Marketing & Brand" should not be excluded for "brand").
 - **Pipe0: use curl via subprocess** — Python requests blocked by Cloudflare.
+- **Pipe0: build the body with `pipe0_payload.py` / `pipe0-payload.ts`, never by hand.** Unknown filter keys are billed-and-ignored, free-text regions are unvalidated, and every filter is advisory — the builder is what stops all three (Provider E → Operational Rules).
 - **Never re-run before reviewing results** — save request IDs, poll for results, don't double-submit.
 - **Unicode in company names** — CSV may use curly apostrophes (`\u2019`). Use `repr()` to debug string comparison failures.
 
@@ -534,7 +593,8 @@ In `update_status()`, look up by domain first, fall back to `merchantName` if no
 
 - BetterContact Search (persona mode) — API endpoint and usage
 - Exa Websets via Pipe0 for people discovery
-- Pipe0 Crustdata company-mode hit rates as PRIMARY search (currently only measured as AM-fallback)
+- Pipe0 `crustdata@3` company-mode hit rates as PRIMARY search (currently only measured as amplemarket-fallback)
+- Pipe0 persona-mode hit rates — the three searches have only been measured company-anchored
 
 ---
 
